@@ -57,6 +57,7 @@ struct Process
     int starved = 0;
 
     long long totalCpu = 0;
+    int readySource = 0; // 0=arrival, 1=IO, 2=resource, 3=quantum/preempt
 };
 
 struct GanttSeg
@@ -429,8 +430,9 @@ void solve()
         resources[ridToIdx[rid]].available += give;
     };
 
-    auto pushReady = [&](int pid){
+    auto pushReady = [&](int pid, int source){
         procs[pid].state = READY_;
+        procs[pid].readySource = source;
         int p = procs[pid].pr;
         if (p < 0) p = 0;
         if (p > 20) p = 20;
@@ -448,7 +450,8 @@ void solve()
                 doGrant(pid, rid, amt);
                 procs[pid].waitRid = -1;
                 procs[pid].waitAmt = 0;
-                pushReady(pid);
+                procs[pid].readyWait = 0; // reset wait counter for new ready entry
+                pushReady(pid, 2); // resource unblock
             }
             else keep.push_back(pid);
         }
@@ -496,7 +499,7 @@ void solve()
         // arrivals
         for (int i = 0; i < (int)procs.size(); i++)
             if (procs[i].state == NEW_ && procs[i].arrival == t)
-                pushReady(i);
+                pushReady(i, 0); // arrival
 
         // IO tick
         {
@@ -509,7 +512,8 @@ void solve()
                     procs[pid].burstInd++;   // finished IO burst
                     procs[pid].opInd = 0;
                     procs[pid].remC = 0;
-                    pushReady(pid);
+                    procs[pid].readyWait = 0; // reset wait counter for new ready entry
+                    pushReady(pid, 1); // IO completion
                 }
                 else newIO.push_back(pid);
             }
@@ -554,7 +558,17 @@ void solve()
                     }
                 }
             }
-            pushReady(pid);
+        }
+
+        // Sort by source to maintain correct order: arrival > IO > resource > quantum
+        sort(allReady.begin(), allReady.end(), [&](int a, int b){
+            return procs[a].readySource < procs[b].readySource;
+        });
+
+        for (int pid : allReady)
+        {
+            int src = procs[pid].readySource;
+            pushReady(pid, src); // preserve source
         }
         // ----------------------------------------------------
 
@@ -566,7 +580,7 @@ void solve()
         // preempt if someone higher pr exists
         if (cur != -1 && bestPr != -1 && bestPr < procs[cur].pr)
         {
-            pushReady(cur);
+            pushReady(cur, 3); // preemption
             cur = -1;
         }
 
@@ -598,7 +612,9 @@ void solve()
 
                     if (procs[cur].opInd >= (int)B.ops.size())
                     {
-                        // finished CPU burst, move to next burst
+                        // finished CPU burst, restore priority
+                        procs[cur].pr = procs[cur].originalPr;
+                        procs[cur].readyWait = 0;
                         procs[cur].burstInd++;
                         procs[cur].opInd = 0;
                         procs[cur].remC = 0;
@@ -679,7 +695,7 @@ void solve()
                 // quantum expired
                 else if (cur != -1 && procs[cur].qleft == 0)
                 {
-                    pushReady(cur);
+                    pushReady(cur, 3); // quantum expiry
                     cur = -1;
                 }
             }
