@@ -430,9 +430,10 @@ void solve()
         resources[ridToIdx[rid]].available += give;
     };
 
-    auto pushReady = [&](int pid, int source){
+    auto pushReady = [&](int pid, int source, bool resetWait = true){
         procs[pid].state = READY_;
         procs[pid].readySource = source;
+        if (resetWait) procs[pid].readyWait = 0;
         int p = procs[pid].pr;
         if (p < 0) p = 0;
         if (p > 20) p = 20;
@@ -450,7 +451,6 @@ void solve()
                 doGrant(pid, rid, amt);
                 procs[pid].waitRid = -1;
                 procs[pid].waitAmt = 0;
-                procs[pid].readyWait = 0; // reset wait counter for new ready entry
                 pushReady(pid, 2); // resource unblock
             }
             else keep.push_back(pid);
@@ -496,34 +496,7 @@ void solve()
 
     while (true)
     {
-        // arrivals
-        for (int i = 0; i < (int)procs.size(); i++)
-            if (procs[i].state == NEW_ && procs[i].arrival == t)
-                pushReady(i, 0); // arrival
-
-        // IO tick
-        {
-            vector<int> newIO;
-            for (int pid : ioList)
-            {
-                procs[pid].ioRem--;
-                if (procs[pid].ioRem == 0)
-                {
-                    procs[pid].burstInd++;   // finished IO burst
-                    procs[pid].opInd = 0;
-                    procs[pid].remC = 0;
-                    procs[pid].readyWait = 0; // reset wait counter for new ready entry
-                    pushReady(pid, 1); // IO completion
-                }
-                else newIO.push_back(pid);
-            }
-            ioList.swap(newIO);
-        }
-
-        // unblock attempt (in case resources were freed earlier tick)
-        tryUnblockAll();
-
-        // ---- READY aging ONCE per tick (no double-touch) ----
+        // ---- READY aging FIRST (before adding new processes) ----
         vector<int> allReady;
         for (int pr = 0; pr <= 20; pr++)
         {
@@ -568,9 +541,35 @@ void solve()
         for (int pid : allReady)
         {
             int src = procs[pid].readySource;
-            pushReady(pid, src); // preserve source
+            pushReady(pid, src, false); // preserve source and wait time
         }
         // ----------------------------------------------------
+
+        // NOW add new arrivals (after aging existing processes)
+        for (int i = 0; i < (int)procs.size(); i++)
+            if (procs[i].state == NEW_ && procs[i].arrival == t)
+                pushReady(i, 0); // arrival
+
+        // IO tick
+        {
+            vector<int> newIO;
+            for (int pid : ioList)
+            {
+                procs[pid].ioRem--;
+                if (procs[pid].ioRem == 0)
+                {
+                    procs[pid].burstInd++;   // finished IO burst
+                    procs[pid].opInd = 0;
+                    procs[pid].remC = 0;
+                    pushReady(pid, 1); // IO completion
+                }
+                else newIO.push_back(pid);
+            }
+            ioList.swap(newIO);
+        }
+
+        // unblock attempt (in case resources were freed earlier tick)
+        tryUnblockAll();
 
         // best ready
         int bestPr = -1;
@@ -612,9 +611,8 @@ void solve()
 
                     if (procs[cur].opInd >= (int)B.ops.size())
                     {
-                        // finished CPU burst, restore priority
+                        // finished CPU burst - restore priority
                         procs[cur].pr = procs[cur].originalPr;
-                        procs[cur].readyWait = 0;
                         procs[cur].burstInd++;
                         procs[cur].opInd = 0;
                         procs[cur].remC = 0;
@@ -671,6 +669,8 @@ void solve()
 
                 if (procs[cur].remC == 0)
                 {
+                    // Completed a CPU time segment - restore priority
+                    procs[cur].pr = procs[cur].originalPr;
                     procs[cur].opInd++; // move to next op
                     // immediately execute following instant ops (R/F) at same time boundary
                     if (cur != -1) execInstantOps();
